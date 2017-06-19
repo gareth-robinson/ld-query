@@ -63,8 +63,6 @@
             
     */
     var nonExpandableValuePropNamePattern = /@(?!type|id).*/;
-
-    var stepCache = {};
     
     // this builds a set of nested functions which are capable of expanding namespace alises to full prefixes
     // if two parameters are provided then use the second parameter, otherwise use the first parameter.
@@ -101,152 +99,99 @@
 
         }, null );
 
-    function arrayRange( arr ) {
+    // given a nodePath 'path' entry, store any values of the object starting with an @ against it
+    function addObjectAttributesToPath( json, path ) {
 
-        var len = arr.length;
+        if ( typeof json === "object" ) {
 
-        var list = [];
-        
-        if ( 0 < len ) {
+            for( var prop in json ) {
 
-            while ( len-- ) {
-                
-                list.push(len);
-                
+                if ( prop.charAt( 0 ) === "@" ) { path[ prop ] = ( path[ prop ] || [] ).concat( json[ prop ] ); }
+
             }
 
         }
 
-        return list;
     }
 
-    function objectProps( o ) {
-        var ret = [];
-        for ( var p in o ) { ret.push(p); }
-        return ret;
+    function seekInObject( obj, assessPath, isSeekAll, path ) {
+
+        var acc = isSeekAll ? [] : null;
+        for( var prop in obj ) {
+
+            var propPath = [ { path: prop } ].concat( path );
+            var found = seek( obj[ prop ], assessPath, isSeekAll, propPath );
+            if ( typeof found !== "undefined" && found !== null ) {
+
+                if( !isSeekAll ) { return found; }
+                if ( prop === "@type" && found.length ) { 
+                    
+                    acc.push( found );
+
+                } else {
+                
+                    acc = acc.concat( found );
+                    
+                }
+
+            }
+
+        }
+        return acc;
+
     }
 
-    function StackFrame( parent, key, ctx ) {
+    function seekInArray( array, assessPath, isSeekAll, path ) {
 
-        var ret;
-        if ( isArray( ctx ) ) {
+        var acc = isSeekAll ? [] : null;
+        var len = array.length;
+        if (0 < len) {
 
-            if ( "@type" === key ) {
+            var path0 = path[0].path;
+            for( var i = 0; i < len; i++ ) {
                 
-                ret = {
-                    type: "leaf",
-                    context: ctx,
-                    index: -1,
-                    key: key,
-                    items: []
-                };
-
-            } else {
-
-                ret = {
-                    type: "array",
-                    context: ctx,
-                    index: -1,
-                    key: key,
-                    items: arrayRange(ctx)
-                };
-
-            }
-            
-        } else if ( "object" === typeof ctx ) {
-
-            var keys = Object.keys(ctx);
-            keys.reverse();
-            ret = {
-                type: "object",
-                context: ctx,
-                index: -1,
-                key: key,
-                items: keys
-            };
-
-        } else {
-
-            ret = {
-                type: "leaf",
-                context: ctx,
-                index: -1,
-                key: key,
-                items: []
+                // when recursing through an array, make sure the most recent path entry is cloned
+                // since it is mutated by 'addObjectAttributesToPath'
+                var pathClone = [].concat( path );
+                pathClone[ 0 ] = { path: path0 };
+                var found = seek( array[ i ], assessPath, isSeekAll, pathClone );
+                if ( typeof found !== "undefined" && found !== null ) {
+                    
+                    if ( !isSeekAll ) { return found; }
+                    acc = acc.concat( found );
+                    
+                }
+                
             }
 
         }
+        return acc;
 
-        if ( "array" === parent.type ) {
-            
-            ret.index = key;
-            ret.key = parent.key;
-
-        }
-
-        return ret;
     }
-    
-    function walk(doc, stepf, self) {
-        self = self || this;
-        
-        var stack = [ StackFrame( {}, "#document", doc ) ];
-        var stepId = 0;
-        var path = [{
-            id: stepId++,
-            type: "object",
-            context: undefined,
-            key: "#document",
-            value: doc
-        }];
 
-        while ( 0 < stack.length ) {
+    function seek( json, assessPath, isSeekAll, path ) {
 
-            var frame = stack[ stack.length - 1 ];
-            var items = frame.items;
+        var found = isSeekAll ? [] : null;
+        path = path || [];
+        if ( typeof json === "undefined" ) { return found; }
+        addObjectAttributesToPath( json, path[ 0 ] );
 
-            if ( 0 === items.length ) {
+        if ( assessPath( path ) ) {
 
-                if ( "array" !== frame.type ) { path.pop(); }
-                stack.pop();
-                continue;
+            found = json;
 
-            }
+        } else if ( isArray( json ) ) {
 
-            var item = items.pop();
-            var value = frame.context[ item ];
-            var newFrame = StackFrame( frame, item, value );
+            found = seekInArray( json, assessPath, isSeekAll, path );
 
-            if ( "array" === newFrame.type ) {
+        } else if ( typeof json === "object" ) {
 
-                stack.push( newFrame );
-                continue;
-                
-            }
-            
-            path.push({
-                id: stepId++,
-                type: newFrame.type,
-                context: frame.context,
-                key: newFrame.key,
-                index: newFrame.index,
-                value: value
-            });
-            
-            stepf.call( self, path )
+            found = seekInObject( json, assessPath, isSeekAll, path );
 
-            if ( "leaf" === newFrame.type ) {
-
-                path.pop();
-                
-            } else {
-
-                stack.push( newFrame );
-                
-            }
         }
 
-        return self;
+        return found;
+
     }
 
     function testPathKey( nodePathEntry, stepKey, stepValue ) {
@@ -263,79 +208,53 @@
             } );
 
         }
-        else if ( isArray( pathValue ) ) {
-
-            return ~pathValue.indexOf(stepValue)
-
-        }
         return pathValue === stepValue;
 
     }
 
     function findNextPathMatch( nodePath, start, step ) {
-        var i = start;
-        for ( var i = start; -1 < i; i-- ) {
 
-            var node = nodePath[ i ];
-            var nodeVal = node.value;
-            var stepPath = step.path;
+        for ( var i = start; i < nodePath.length; i++ ) {
+
             // check whether all keys in step ( path & @attributes ) match
-            var test =
-                ( "undefined" === typeof stepPath || stepPath === node.key )
-                && step.tests.every( function( test ) {
+            var test = Object.keys( step ).every( function( key ) {
 
-                    return testPathKey( nodeVal, test.key, test.expected );
+                return testPathKey( nodePath[ i ], key, step[ key ] );
 
-                });
-            
-            if ( test ) { break; }
+            } );
+            if ( test ) { return i; }
 
         }
-
-        return i;
+        return -1;
 
     }
 
     function assessPathForSteps( steps ) {
-        var tests = (steps || []);
-        
+
         return function assessPath( nodePath ) {
-            if ( !nodePath ) { return false; }
-            
-            var bookmark = nodePath.length;
+
+            var bookmark = -1;
             var directChild = false;
-            var first = true;
-            
-            return tests.every( function( step ) {
+            if ( !nodePath ) { return false; }
+            return steps.every( function( step ) {
+
                 if ( step.directChild ) {
 
                     directChild = true;
                     return true;
 
                 } else {
-                    var start = bookmark - 1;
+
                     // find the next step starting after the bookmarked offset
-                    var found = findNextPathMatch(nodePath, start, step);
-                    if ( first ) {
-
-                        if ( found !== start ) {
-
-                            return false;
-                            
-                        }
-
-                        first = false;
-                    }
+                    var found = findNextPathMatch( nodePath, bookmark + 1, step );
                     // if the directChild flag is set, only pass if the found is beside the last bookmark...
                     if ( directChild ) {
 
-                        if ( bookmark !== found + 1 ) { return false; }
+                        if ( bookmark + 1 !== found) { return false; }
                         directChild = false;
 
                     }
-
                     bookmark = found;
-
                     // ...otherwise any match is fine
                     return ~bookmark;
 
@@ -347,54 +266,13 @@
 
     }
 
-    function collectPaths( json ) {
-        var stepf = function( path ) { this.push( [].concat( path ) ); };
-
-        return walk( json, stepf, [] );
-    }
-
-    function cachedWalk( paths, steps, isSeekAll ) {
-
-        var assess = assessPathForSteps( steps );
-        var result = isSeekAll ? [] : null;
-        var path;
-        for ( var ii = 0; ii < paths.length; ii++ ) {
-
-            path = paths[ ii ];
-            if ( assess( path ) ) {
-
-                var found;
-                if ( steps[0].path === "@type" ) {
-
-                    found = path[ path.length - 2 ].value["@type"];
-
-                } else {
-                
-                    found = path[ path.length - 1 ].value;
-
-                }
-                
-                if ( !isSeekAll ) {
-
-                    return found;
-                    
-                }
-                result.push( found );
-
-            }            
-            
-        }
-        return result;
-    }
-
-    
     function extractStep( path, steps ) {
 
         // try and extract a 'where' [@attribute=value] part from the start of the string
         var wherePart = /^(\s*\*?)\[(.+?)=(.+?)\](.*)/.exec( path );
         if ( wherePart ) {
 
-            if ( wherePart[ 1 ] ) { steps.push( { path: undefined, directChild: false, tests: []} ); }
+            if ( wherePart[ 1 ] ) { steps.push( { } ); }
             var step = { key : wherePart[ 2 ].trim(), value: wherePart[ 3 ].trim() };
             if ( !nonExpandableValuePropNamePattern.test( step.key ) ) { step.value = expand( step.value ); }
             steps.push( step );
@@ -405,7 +283,7 @@
         var directChildPart = /^\s*>\s*(.*)/.exec( path );
         if ( directChildPart ) {
 
-            steps.push( { path: undefined, directChild: true, tests: [] } );
+            steps.push( { directChild: true } );
             return directChildPart[ 1 ];
 
         }
@@ -413,33 +291,18 @@
         var pathPart = /^(.+?)( .*|\[.*|>.*)/.exec( path );
         if ( pathPart ) {
 
-            steps.push( {
-                path: expand( pathPart[ 1 ].trim()),
-                directChild: false,
-                tests: []
-            } );
+            steps.push( { path: expand( pathPart[ 1 ].trim() ) } );
             return pathPart[ 2 ];
 
         }
         // assume whatever is left is a path
-        steps.push( {
-            path: expand( path.trim() ),
-            directChild: false,
-            tests: []
-        } );
+        steps.push( { path: expand( path.trim() ) } );
         return "";
 
     }
 
     function getSteps( path ) {
 
-        var steps = stepCache[path];
-        if (steps) {
-
-            return steps;
-            
-        }
-        
         // cut the path up into separate pieces;
         var separatedSteps = [];
         var remainder = path.trim();
@@ -450,13 +313,14 @@
         }
 
         // create an path alias '#document' to represent the root of the current QueryNode json
-        steps = [ { path: "#document", directChild: false, tests: [] } ];
+        var steps = [ { path: "#document" } ];
         // process the extracted steps, to combine 'where' steps into keys on path steps.
         separatedSteps.forEach( function( step ) {
 
             if ( step.key ) {
 
-                steps[ 0 ].tests.push({ key: step.key, expected: step.value });
+                var lastStep = steps[ 0 ];
+                lastStep[ step.key ] = ( lastStep[ step.key ] || [] ).concat( step.value );
 
             } else {
 
@@ -467,39 +331,16 @@
 
         } );
 
-        stepCache[path] = steps;
-        
         return steps;
 
     }
 
-    function getCachedPaths( state, json ) {
-
-        if ( !state.cachePaths ) {
-
-            return collectPaths( json );
-
-        }
-        
-        var paths = state.paths;
-        if ( !paths ) {
-            
-            paths = state.paths = collectPaths( json );
-
-        }
-
-        return paths;
-
-    }
-    
     // select json for this path
-
-    function select( state, json, path, isSeekAll ) {
+    function select( json, path, isSeekAll ) {
 
         var steps = getSteps( path );
         if ( !steps.length ) { return { json: null }; }
-        var paths = getCachedPaths( state, json );
-        var found = cachedWalk( paths, steps, isSeekAll ); 
+        var found = seek( json, assessPathForSteps( steps ), isSeekAll, [ { path: "#document" } ] );
         var lastStep = steps[ 0 ].path;
         return {
 
@@ -511,49 +352,29 @@
 
     }
 
-    function QueryNode( jsonData, parent ) {
+    function QueryNode( jsonData ) {
 
         this.json = function() { return jsonData; };
-        var state = this._state = { cachePaths: true, paths: null };
-        if ( parent ) {
-            
-            var pstate = parent._state;
-
-            state.cachePaths = pstate.cachePaths;
-
-        }
-    }
-
-    function buildQueryNode( parent ) {
-
-        return function( json ) { return new QueryNode( json, parent ); }
 
     }
 
-    QueryNode.prototype.withPathCaching = function( cache ) {
-        cache = !!cache;
-        this._state.cachePaths = cache;
-        cache || ( this._state.paths = null );
-        return this;
-        
-    }
+    function buildQueryNode( jsonData ) { return new QueryNode( jsonData ); }
 
     QueryNode.prototype.query = function( path ) {
 
         // select the json targetted by this path
-        var selection = select( this._state, this.json(), path );
+        var selection = select( this.json(), path );
         // if the result is "final" (e.g. @value), just return the json raw
-        return selection.isFinal ? selection.json : new QueryNode( selection.json, this);
+        return selection.isFinal ? selection.json : new QueryNode( selection.json );
 
     };
     QueryNode.prototype.queryAll = function( path ) {
 
         // select the json targetted by this path
-        var selections = select( this._state, this.json(), path, true );
+        var selections = select( this.json(), path, true );
 
         // if the result is "final" (e.g. @value), return an array of the raw json
-        return selections.isFinal ? selections.json
-            : selections.json.map( buildQueryNode( this ) );
+        return selections.isFinal ? selections.json : selections.json.map( buildQueryNode );
 
     };
 
